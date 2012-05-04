@@ -13,7 +13,7 @@ use URI::Escape;
 use POSIX qw/strftime/;
 use LWP;
 use utf8;
-my $query = uri_unescape($ENV{'QUERY_STRING'});
+my $remote_addr = uri_unescape($ENV{'REMOTE_ADDR'});
 
 # some browsers display data faster if we flush more often
 $|++;
@@ -24,20 +24,24 @@ sub usage {
   -f|--feed feed_url - URL to RSS feed you want to bolt from (defaults to Google News)
   -c|--count integer - only grab X from feed
   -v|--verbose - print debugging information helpful for finding feed problems
-  
   --hide - default to user hide for the created bolts
 
   More information on the BO.LT API: https://dev.bo.lt/
   You can get your token from: https://bo.lt/app/settings#api-app-form\n");
 }
 
+my $app_secret="SECRET";
+my $app_key="KEY";
 my ($help, $stamp, $verbose);
 my $grab_count = 10;
 my $grabbed = 0;
 my $hide = "";
-my $http_prefix = "http://domain.com/~someone/temp/";
-my $http_dir = "/home/someone/public_html/temp/";
-my $feedurl = "http://news.google.com/news?ned=us&topic=h&output=rss";
+my $cgi_host = "some.host";
+my $cgi_url = "http://" . $cgi_host . "/feed.cgi";
+my $http_prefix = "http://" . $cgi_host . "/path/";
+my $http_dir = "/home/user/path/";
+my $log_dir = "/home/user/var/";
+my $feedurl = "";
 my $token = "";
 my $update = "";
 my $tag = "feed";
@@ -83,6 +87,9 @@ sub get_url {
   my $url = $_[0];
   my $user_agent = LWP::UserAgent->new;
   my $output = $user_agent->get($url);
+  if ($verbose) {
+    print "get_url: $url success " . $output->is_success . "and status " . $output->status_line . "\n";
+  }
   if ($output->is_success) {
     return $output;
   } else {
@@ -160,7 +167,6 @@ sub bolt {
       print "INFO: content $content\n";
     }
   } elsif ($url =~ /pinterest.com/) { 
-    $async = "FALSE";
     my $pin_source_url = "";
     my $pin_pinner = "";
     my $pin = get_url($url);
@@ -246,7 +252,7 @@ sub bolt {
     print "$link\n";
   }
 
-  print "bolt $bolt_content output\n";
+  print "<pre>bolt $bolt_content\n</pre>";
   if ($bolt_content =~ /http:\/\/bo.lt\//) {
     $grabbed++;
   }
@@ -288,52 +294,99 @@ sub getNewLinksFromFeed {
   }
 }
 
-if ($query) {
-  if ($query =~ /tag=([^\&]+)/) {
-    $custom_tags = $1;
-  }
-  if ($query =~ /URL=([^\&]+)/) {
-    $feedurl = $1;
-  }
-  if ($query =~ /token=([^\&]+)/) {
-    $token = $1;
-  }
-  if ($query =~ /update=([^\&]+)/) {
-    $update = $1;
-  }
-
-  if ($query =~ /hide=true/) {
-    $hide = "--hide";
-  }
-  print "Content-Type: text/plain\n\n";
-
-  $async = "TRUE";
-  $grab_count = 5;
-  if ($update =~ /update/) {
-    #at some point this should be account specific
-    my $accounts = get_url("https://api.bo.lt/accounts.plain?access_token=" . $token);
-    if ($accounts->content =~ /accounts:(\d+).default_for_user	true/) {
-      my $account_id = $1;
-      if ($accounts->content =~ /accounts:$account_id.id	(\S+)/) {
-        $account = $1;
+if ($remote_addr) {
+  my $query = uri_unescape($ENV{'QUERY_STRING'});
+  my $cookie = uri_unescape($ENV{'HTTP_COOKIE'});
+  if (!$token) {
+    if ($cookie) {
+      if ($cookie =~ /m4_token=([^;]+)/) {
+        $token = $1;
       }
     }
-    if ($verbose) {
-      print "INFO:accounts: " . $accounts->content . "\n";
-    }
-    #  accounts:1.id   rawr
-    #accounts:1.name rawr
-    #accounts:1.user_hide    false
-    #accounts:1.community_hide       true
-    #accounts:1.default_for_user     true
-    if ($account =~ /./) {
-      print "about to save with $account $token $feedurl $custom_tags\n";
-      open(FH,">>" . $http_dir . "/rss-log-account");
-      print FH "$token $account $feedurl $custom_tags $hide\n";
-      close(FH);
+  }
+  if ($query) {
+    if ($query =~ /error=(.*)/) {
+      print "fatal error $1\n";
+    } elsif ($query =~ /code=(.*)/) {
+      my $oauth_token = "";
+      my $secret_code_of_awesome = get_url("https://api.bo.lt/oauth/access_token.plain?app_key=" . $app_key . "&app_secret=" . $app_secret . "&code=" . $1);
+      if ($secret_code_of_awesome->content =~ /access_token\t(.+)/) {
+        $oauth_token = $1;
+        print "Set-Cookie: m4_token=" . $1 . "; Domain=" . $cgi_host . "; Expires=Sat, 05-May-2022 03:30:52 GMT; Path=/\n";
+      }
+      print "Location: " . $cgi_url . "\n";
+      exit(0);
+    } elsif ($query =~ /token=([^\&]+)/) {
+      if (!$token) {
+        $token = $1;
+      }
     }
   }
-  print "Working on feed: " . $feedurl . " with custom_tags: " . $custom_tags . "\n";
+  if (!$token) {
+    my $callback_url = uri_escape($cgi_url);
+    print "Location: https://bo.lt/app/dialog/oauth?app_key=" . $app_key . "&redirect_uri=" . $callback_url . "&scope=CREATE,READ,EDIT\n";
+    exit(0);
+  }
+
+   
+  if ($query) { 
+    print "Content-Type: text/html\n\n";
+
+    if ($query =~ /tag=([^\&]+)/) {
+      $custom_tags = $1;
+    }
+    if ($query =~ /URL=([^\&]+)/) {
+      $feedurl = $1;
+    }
+    if ($query =~ /update=([^\&]+)/) {
+      $update = $1;
+    }
+  
+    if ($query =~ /hide=true/) {
+      $hide = "--hide";
+    }
+  
+    $grab_count = 5;
+    if ($update =~ /update/) {
+      my $accounts = get_url("https://api.bo.lt/accounts.plain?access_token=" . $token);
+      if ($accounts->content =~ /accounts:(\d+).default_for_user	true/) {
+        my $account_id = $1;
+        if ($accounts->content =~ /accounts:$account_id.id	(\S+)/) {
+          $account = $1;
+        }
+      }
+      if ($verbose) {
+        print "INFO:accounts: " . $accounts->content . "\n";
+      }
+      if ($account =~ /./) {
+        if ($verbose) {
+          print "about to save with $account $token $feedurl $custom_tags\n";
+        }
+        open(FH,">>" . $log_dir . "/rss-log-account");
+        print FH "$token $account $feedurl $custom_tags $hide\n";
+        close(FH);
+      }
+    }
+    print "<pre>Working on feed: " . $feedurl . " with custom_tags: " . $custom_tags . "\n</pre>";
+  } else {
+    print "Content-Type: text/html\n\n";
+    print "<body><html>
+      <form name=\"input\" action=\"feed.cgi\" method=\"get\">
+        URL: <input type=\"text\" name=\"URL\" />
+        token: <input type=\"text\" name=\"token\"";
+    if ($token) {
+      print " value=\"" . $token . "\"";
+    }
+    print " />
+        tags: <input type=\"text\" name=\"tag\" />
+        <input type=\"checkbox\" name=\"update\" value=\"update\" /> autobolt
+        <input type=\"checkbox\" name=\"hide\" value=\"true\" /> hide
+        <input type=\"submit\" value=\"Submit\" />
+      </form>
+      <br><a href=\"/reset.cgi\">Reset token/login to another account</a><br>
+      </html></body>";
+     exit(0);
+   }
 } else {
   GetOptions(
     "account|a=s" => \$account,
