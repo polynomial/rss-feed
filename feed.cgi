@@ -1,4 +1,7 @@
 #!/usr/bin/perl 
+# Ben Smith 5/12
+# Proof of concept for a basic oauth token based rss/atom feed reader.
+# TODO: cron method that allows you to update automatically, currently done with shell wrapper
 
 use strict;
 use warnings;
@@ -30,27 +33,20 @@ sub usage {
   You can get your token from: https://bo.lt/app/settings#api-app-form\n");
 }
 
-my $app_secret="SECRET";
-my $app_key="KEY";
-my ($help, $stamp, $verbose);
+my $app_secret="APP_SECRET";
+my $app_key="APP_KEY";
+my ($help, $stamp, $verbose, $hide, $batch, $token, $feedurl, $update, $account, $image, $description);
 my $grab_count = 10;
 my $grabbed = 0;
-my $hide = "";
-my $cgi_host = "some.host";
-my $cgi_url = "http://" . $cgi_host . "/feed.cgi";
-my $http_prefix = "http://" . $cgi_host . "/path/";
-my $http_dir = "/home/user/path/";
-my $log_dir = "/home/user/var/";
-my $feedurl = "";
-my $token = "";
-my $update = "";
+my $http_prefix = "http://some.url/pin/";
+my $cookie_domain = "some.domain";
+my $cgi_url = "http://" . $cookie_domain . "/feed.cgi";
+my $http_dir = "/some/place/html/pin/";
+my $log_dir = "/some/place/html/";
 my $tag = "feed";
 my $async = "FALSE";
-my $account = "";
 my $not_really_unique_string = rand();
 my $title = "Ahoy";
-my $image = "";
-my $description = "";
 #$verbose = "true";
 my $custom_tags = "rss=true";
 
@@ -148,7 +144,7 @@ sub bolt {
     if ($content =~ /reddit.com\/r\/([^\/]+)\//) {
       $subreddit = $1;
     }
-    if ($content =~ /(http:\/\/www.reddit.com\/r\/[^\/]+\/[^\/]+[^"]+)/) {
+    if ($content =~ /(http:\/\/www.reddit.com\/r\/[^"]+)/) {
       $comment_link = $1;
     }
       
@@ -204,21 +200,32 @@ sub bolt {
     $bolt_request .= "&data-description=" . uri_escape($description);
     $bolt_request .= "&data-title=" . uri_escape($title);
     $comment = $description;
-    if ($pin_source =~ /^failed$/ || $pin_source_url =~ /flickr.com/) {
+    if ($pin_source =~ /^failed$/ || $pin_source_url =~ /flickr\.com/ || $pin_source_url =~ /google\./) {
       $encoded_url = uri_escape($url);
+    } elsif ($pin_source_url =~ /\.(jpg|gif|png|jpeg|bmp)/i) {
+      $encoded_url = uri_escape($pin_source);
     } else {
       my $line = "";
       my $parsed_page = "";
+      my $added_og = 0;
       foreach $line (split(/\n/,$pin_source->content)) {
-        if ($line =~ /<head>/) {
+        if ($line =~ /<head/) {
           $parsed_page .= $line;
           $parsed_page .= "<base href=\"$pin_source_url\"/>\n";
         } elsif ($line =~ /property="og:image"/) {
           $parsed_page .= "<meta content=\"$image\" property=\"og:image\" />\n";
+          $added_og = 1;
+        } elsif ($line =~ /<body/) {
+          if (!$added_og) {
+            $parsed_page .= "<meta content=\"$image\" property=\"og:image\" />\n";
+            $added_og = 1;
+          }
+          $parsed_page .= $line;
         } else {
           $parsed_page .= $line;
         }
       }
+      $not_really_unique_string = rand();
       put_content($http_dir . $not_really_unique_string . ".html", $parsed_page);
       $encoded_url = uri_escape($http_prefix . $not_really_unique_string . ".html");
     }
@@ -255,8 +262,11 @@ sub bolt {
   print "<pre>bolt $bolt_content\n</pre>";
   if ($bolt_content =~ /http:\/\/bo.lt\//) {
     $grabbed++;
+    if ($verbose) {
+      print "grabbed: $grabbed $grab_count\n";
+    }
   }
-  unlink $http_dir . $not_really_unique_string . ".html";
+  #unlink $http_dir . $not_really_unique_string . ".html";
 }
 
 sub getNewLinksFromFeed {
@@ -312,7 +322,7 @@ if ($remote_addr) {
       my $secret_code_of_awesome = get_url("https://api.bo.lt/oauth/access_token.plain?app_key=" . $app_key . "&app_secret=" . $app_secret . "&code=" . $1);
       if ($secret_code_of_awesome->content =~ /access_token\t(.+)/) {
         $oauth_token = $1;
-        print "Set-Cookie: m4_token=" . $1 . "; Domain=" . $cgi_host . "; Expires=Sat, 05-May-2022 03:30:52 GMT; Path=/\n";
+        print "Set-Cookie: m4_token=" . $1 . "; Domain=" . $cookie_domain . "; Expires=Sat, 05-May-2022 03:30:52 GMT; Path=/\n";
       }
       print "Location: " . $cgi_url . "\n";
       exit(0);
@@ -324,7 +334,7 @@ if ($remote_addr) {
   }
   if (!$token) {
     my $callback_url = uri_escape($cgi_url);
-    print "Location: https://bo.lt/app/dialog/oauth?app_key=" . $app_key . "&redirect_uri=" . $callback_url . "&scope=CREATE,READ,EDIT\n";
+    print "Location: https://bo.lt/app/dialog/oauth?app_key=" . $app_key . "&redirect_uri=" . $callback_url . "&scope=CREATE,READ,EDIT,ADMINISTER\n";
     exit(0);
   }
 
@@ -332,6 +342,9 @@ if ($remote_addr) {
   if ($query) { 
     print "Content-Type: text/html\n\n";
 
+    if ($query =~ /batch=([^\&]+)/) {
+      $batch = $1;
+    }
     if ($query =~ /tag=([^\&]+)/) {
       $custom_tags = $1;
     }
@@ -346,8 +359,8 @@ if ($remote_addr) {
       $hide = "--hide";
     }
   
+ $verbose="true";
     $grab_count = 5;
-    if ($update =~ /update/) {
       my $accounts = get_url("https://api.bo.lt/accounts.plain?access_token=" . $token);
       if ($accounts->content =~ /accounts:(\d+).default_for_user	true/) {
         my $account_id = $1;
@@ -358,11 +371,12 @@ if ($remote_addr) {
       if ($verbose) {
         print "INFO:accounts: " . $accounts->content . "\n";
       }
+    if ($update =~ /update/ || $batch =~ /true/) {
       if ($account =~ /./) {
         if ($verbose) {
           print "about to save with $account $token $feedurl $custom_tags\n";
         }
-        open(FH,">>" . $log_dir . "/rss-log-account");
+        open(FH,">>" . $log_dir . "/batch-account");
         print FH "$token $account $feedurl $custom_tags $hide\n";
         close(FH);
       }
@@ -381,6 +395,7 @@ if ($remote_addr) {
         tags: <input type=\"text\" name=\"tag\" />
         <input type=\"checkbox\" name=\"update\" value=\"update\" /> autobolt
         <input type=\"checkbox\" name=\"hide\" value=\"true\" /> hide
+        <input type=\"checkbox\" name=\"batch\" value=\"true\" /> batch
         <input type=\"submit\" value=\"Submit\" />
       </form>
       <br><a href=\"/reset.cgi\">Reset token/login to another account</a><br>
@@ -396,23 +411,26 @@ if ($remote_addr) {
     "tags=s" => \$custom_tags,
     "verbose|v" => \$verbose,
     "help|h" => \$help,
-    "count|c" => \$grab_count,
+    "count|c=s" => \$grab_count,
   );
 }
 
-if ($feedurl !~ /^http/) {
-  $feedurl = "http://" . $feedurl;
-}
-if ($feedurl =~ /pinterest.com/ || $feedurl =~ /tumblr.com/) {
-  if ($feedurl =~ /pinterest.com\/([^\/]+)\/*$/) {
-    my $pinner = $1;
-    my $pin_account = get_url($feedurl);
-    my $line = "";
-    foreach $line (split(/\n/,$pin_account->content)) {
-      if ($line =~ /<h3 class="serif"><a href="\/$pinner\/([^"]+)"/) {
-        my $pinboard = "http://pinterest.com/$pinner/$1";
-        getNewLinksFromFeed($pinboard, $token, $verbose);
-        $grabbed = 0;
+if ($feedurl) {
+  if ($feedurl !~ /^http/) {
+    $feedurl = "http://" . $feedurl;
+  }
+  if ($feedurl =~ /pinterest.com/ || $feedurl =~ /tumblr.com/) {
+    if ($feedurl =~ /pinterest.com\/([^\/]+)\/*$/) {
+      my $pinner = $1;
+      my $pin_account = get_url($feedurl);
+      my $line = "";
+      foreach $line (split(/\n/,$pin_account->content)) {
+        if ($line =~ /<h3 class="serif"><a href="\/$pinner\/([^"]+)"/) {
+          my $pinboard = "http://pinterest.com/$pinner/$1";
+          print "<pre>found pinboard $pinboard pinner $pinner\n</pre>";
+          getNewLinksFromFeed($pinboard, $token, $verbose);
+          $grabbed = 0;
+        }
       }
     }
   }
@@ -422,7 +440,7 @@ if ($verbose) {
   print "INFO: feed url is now $feedurl\n";
 }
 
-if ($token !~ /.+/) {
+if (!$token) {
   print "ERROR: Need to specify an access token (from https://bo.lt/app/settings#api-app-form)\n";
   usage();
 }
